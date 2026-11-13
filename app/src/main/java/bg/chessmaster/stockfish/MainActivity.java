@@ -719,6 +719,26 @@ public class MainActivity extends Activity {
             s.append(peak.moveNumber).append(" (").append(peak.count).append(" партии)");
         }
         s.append("\n");
+        Map<String,Integer> patterns=new HashMap<>();
+        for(CriticalMoveAnalyzer.Finding f:report.findings){
+            if(f.asWhite!=asWhite)continue;
+            String opening=OpeningWeaknessAnalyzer.openingFamily(f.game.opening);
+            if(opening.isEmpty())opening="Неизвестен дебют";
+            String key=opening+" · ход "+f.fullMove;
+            Integer hits=patterns.get(key);
+            patterns.put(key,hits==null?1:hits+1);
+        }
+        List<Map.Entry<String,Integer>> entries=new ArrayList<>(patterns.entrySet());
+        Collections.sort(entries,(a,b)->{
+            int cmp=Integer.compare(b.getValue(),a.getValue());
+            return cmp!=0?cmp:a.getKey().compareToIgnoreCase(b.getKey());
+        });
+        s.append("Дебюти и критични ходове:\n");
+        for(int i=0;i<Math.min(3,entries.size());i++){
+            Map.Entry<String,Integer> entry=entries.get(i);
+            s.append("• ").append(entry.getKey()).append(": ")
+                .append(entry.getValue()).append(" партии\n");
+        }
     }
     void showCriticalFindings(CriticalMoveAnalyzer.Report report){
         if(report.findings.isEmpty())return;
