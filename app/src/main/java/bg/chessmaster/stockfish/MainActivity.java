@@ -11,6 +11,9 @@ import com.github.bhlangonijr.chesslib.move.*;
 import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
+import java.net.*;
+import java.nio.charset.StandardCharsets;
+import org.json.*;
 
 public class MainActivity extends Activity {
     Board board = new Board();
@@ -19,10 +22,17 @@ public class MainActivity extends Activity {
     int cursor = 0, level = 1800, version = 0;
     volatile int evaluationVersion = 0;
     int boardTheme = 0, pieceStyle = 0;
-    boolean analyzing = false, thinking = false, showEvaluation = false;
+    boolean analyzing = false, thinking = false, showEvaluation = false, showArrow = false, browsingLichess = false;
+    String bestMoveArrow = null;
+    String currentLibraryUser = "";
+    LichessGame selectedLichessGame = null;
+    ArrayList<LichessGame> libraryGames = new ArrayList<>();
+    volatile boolean downloadInProgress = false;
+    ExecutorService networkWorker = Executors.newSingleThreadExecutor();
     LinearLayout root;
     BoardView boardView;
-    TextView info, notation, levelText, evaluationText, evaluationButton;
+    EvaluationBarView evaluationBar;
+    TextView info, notation, levelText, evaluationText, evaluationButton, arrowButton;
     final String[] boardThemes = {"Класическа зелена", "Дървесна", "Синя", "Графит"};
     final String[] pieceStyles = {"Класически фигури", "Минималистични фигури", "Контрастни фигури"};
     final int[][] boardColors = {
@@ -62,8 +72,16 @@ public class MainActivity extends Activity {
         title.setPadding(0,0,0,dp(8)); root.addView(title);
         info = new TextView(this); info.setTextSize(15); info.setGravity(Gravity.CENTER);
         info.setTextColor(Color.DKGRAY); root.addView(info);
+        LinearLayout boardRow = new LinearLayout(this);
+        boardRow.setOrientation(LinearLayout.HORIZONTAL);
+        root.addView(boardRow,new LinearLayout.LayoutParams(-1,Math.min(getResources().getDisplayMetrics().widthPixels-dp(20),dp(510))));
         boardView = new BoardView(this);
-        root.addView(boardView,new LinearLayout.LayoutParams(-1, Math.min(getResources().getDisplayMetrics().widthPixels-dp(20), dp(510))));
+        boardRow.addView(boardView,new LinearLayout.LayoutParams(0,-1,1));
+        evaluationBar = new EvaluationBarView(this);
+        LinearLayout.LayoutParams barLayout = new LinearLayout.LayoutParams(dp(26),-1);
+        barLayout.setMargins(dp(4),0,0,0);
+        boardRow.addView(evaluationBar,barLayout);
+        evaluationBar.setVisibility(showEvaluation?View.VISIBLE:View.GONE);
         levelText = new TextView(this); levelText.setTextSize(15); levelText.setTextColor(Color.BLACK);
         levelText.setPadding(dp(4),dp(9),0,dp(5)); root.addView(levelText);
         SeekBar seek = new SeekBar(this); seek.setMax(strengths.length-1);
@@ -92,6 +110,18 @@ public class MainActivity extends Activity {
         evParams.setMargins(dp(2),dp(5),dp(2),0);
         options.addView(evaluationButton, evParams);
         updateEvaluationButton();
+        LinearLayout libraryRow = new LinearLayout(this);
+        root.addView(libraryRow);
+        addButton(libraryRow,"Lichess ↓",()->askLichessUser());
+        addButton(libraryRow,"Партии",()->showSavedLibraries());
+        addButton(libraryRow,"Моя игра",()->returnToMyGame());
+        TextView arrowControl = button("Стрелка",()->toggleArrow());
+        arrowControl.setTag("arrowControl");
+        LinearLayout.LayoutParams arrowParams = new LinearLayout.LayoutParams(0,dp(49),1);
+        arrowParams.setMargins(dp(2),dp(5),dp(2),0);
+        libraryRow.addView(arrowControl,arrowParams);
+        arrowButton=arrowControl;
+        updateArrowButton();
         evaluationText=new TextView(this);
         evaluationText.setTextSize(16);
         evaluationText.setTextColor(Color.rgb(26,56,65));
@@ -110,9 +140,10 @@ public class MainActivity extends Activity {
     }
     void savePreferences() {
         getPreferences(0).edit()
-            .putString("moves",serialize()).putInt("level",level)
+            .putString("moves",browsingLichess?getPreferences(0).getString("moves",""):serialize()).putInt("level",level)
             .putInt("boardTheme",boardTheme).putInt("pieceStyle",pieceStyle)
-            .putBoolean("showEvaluation",showEvaluation).apply();
+            .putBoolean("showEvaluation",showEvaluation)
+            .putBoolean("showArrow",showArrow).apply();
     }
     void selectBoardTheme() {
         new AlertDialog.Builder(this).setTitle("Избери дизайн на дъската")
@@ -133,39 +164,70 @@ public class MainActivity extends Activity {
         showEvaluation=!showEvaluation;
         updateEvaluationButton();
         evaluationText.setVisibility(showEvaluation?View.VISIBLE:View.GONE);
+        evaluationBar.setVisibility(showEvaluation?View.VISIBLE:View.GONE);
+        savePreferences();
+        refreshEvaluation();
+    }
+    void updateArrowButton(){
+        if(arrowButton!=null)arrowButton.setText(showArrow?"Стрелка ✓":"Стрелка ✕");
+    }
+    void toggleArrow(){
+        showArrow=!showArrow;
+        updateArrowButton();
         savePreferences();
         refreshEvaluation();
     }
     void refreshEvaluation() {
         final int request = ++evaluationVersion;
-        if(!showEvaluation || evaluationText==null)return;
+        bestMoveArrow=null;
+        if(boardView!=null) boardView.invalidate();
+        if(evaluationBar!=null) {
+            evaluationBar.whiteFraction=.5f;
+            evaluationBar.invalidate();
+        }
+        if(!showEvaluation && !showArrow) return;
         if(board.isMated()) {
-            evaluationText.setText(board.getSideToMove()==Side.WHITE?"Мат за черните":"Мат за белите");
+            if(showEvaluation) {
+                evaluationText.setText(board.getSideToMove()==Side.WHITE?"Мат за черните":"Мат за белите");
+                evaluationBar.whiteFraction=board.getSideToMove()==Side.WHITE?0f:1f;
+                evaluationBar.invalidate();
+            }
             return;
         }
         if(board.isDraw() || board.isStaleMate()) {
-            evaluationText.setText("Реми · 0.00");
+            if(showEvaluation) evaluationText.setText("Реми · 0.00");
             return;
         }
         if(thinking) {
-            evaluationText.setText("Оценка: след хода на Stockfish…");
+            if(showEvaluation) evaluationText.setText("Оценка: след хода на Stockfish…");
             return;
         }
         final String fen=board.getFen();
-        evaluationText.setText("Stockfish изчислява оценката…");
+        if(showEvaluation) evaluationText.setText("Stockfish изчислява оценката…");
         worker.execute(()->{
-            if(request!=evaluationVersion || !showEvaluation)return;
-            final String result=Engine.evaluate(enginePath,fen);
+            if(request!=evaluationVersion || (!showEvaluation && !showArrow))return;
+            final Engine.EvalInfo result=Engine.evaluatePosition(enginePath,fen);
             runOnUiThread(()->{
-                if(request!=evaluationVersion || !showEvaluation || !board.getFen().equals(fen))return;
-                evaluationText.setText(result==null?"Оценката не е налична":result);
+                if(request!=evaluationVersion || !board.getFen().equals(fen))return;
+                if(showArrow)bestMoveArrow=result==null?null:result.bestMove;
+                if(showEvaluation){
+                    evaluationText.setText(result==null?"Оценката не е налична":result.summary);
+                    if(result!=null && result.hasScore){
+                        evaluationBar.whiteFraction=(float)(.5+.5*Math.tanh(result.pawns/3.0));
+                    }
+                    evaluationBar.invalidate();
+                }
+                boardView.invalidate();
             });
         });
     }
     void render() {
         if(boardView==null)return;
         boardView.invalidate();
-        String state = board.isMated() ? "Мат! " + (board.getSideToMove()==Side.WHITE?"Stockfish печели":"Ти печелиш") :
+        String state = browsingLichess && selectedLichessGame!=null ?
+            "Lichess: "+selectedLichessGame.white+" – "+selectedLichessGame.black+
+            " ("+selectedLichessGame.result+") • ход "+cursor+"/"+moves.size() :
+            board.isMated() ? "Мат! " + (board.getSideToMove()==Side.WHITE?"Stockfish печели":"Ти печелиш") :
             board.isDraw() || board.isStaleMate() ? "Реми" :
             thinking?"Stockfish пресмята…" :
             cursor<moves.size()?"Преглед на партия • ход "+cursor+"/"+moves.size():
@@ -182,27 +244,29 @@ public class MainActivity extends Activity {
         boardTheme=Math.max(0,Math.min(boardThemes.length-1,getPreferences(0).getInt("boardTheme",0)));
         pieceStyle=Math.max(0,Math.min(pieceStyles.length-1,getPreferences(0).getInt("pieceStyle",0)));
         showEvaluation=getPreferences(0).getBoolean("showEvaluation",false);
+        showArrow=getPreferences(0).getBoolean("showArrow",false);
         try {String s=getPreferences(0).getString("moves","");for(String t:s.split(" ")){if(t.isEmpty())continue;
             Move found=null;for(Move m:board.legalMoves())if(m.toString().equals(t)){found=m;break;}
             if(found==null)break;board.doMove(found);moves.add(found);positions.add(board.getFen());}
             cursor=moves.size();
         }catch(Exception ignored){}
     }
-    void newGame() {version++;thinking=false;analyzing=false;board=new Board();moves.clear();positions.clear();positions.add(board.getFen());cursor=0;boardView.selected=null;render();refreshEvaluation();}
+    void newGame() {if(browsingLichess)returnToMyGame();version++;thinking=false;analyzing=false;board=new Board();moves.clear();positions.clear();positions.add(board.getFen());cursor=0;boardView.selected=null;render();refreshEvaluation();}
     void step(int dir) {if(thinking)return;int target=Math.max(0,Math.min(moves.size(),cursor+dir));
         if(target==cursor)return;version++;cursor=target;board.loadFromFen(positions.get(cursor));boardView.selected=null;render();refreshEvaluation();}
-    void undoTurn() {if(thinking)return;version++;int n=Math.min(2,cursor);if(n==0)return;
+    void undoTurn() {if(browsingLichess){Toast.makeText(this,"Партията от Lichess е само за преглед",Toast.LENGTH_SHORT).show();return;}if(thinking)return;version++;int n=Math.min(2,cursor);if(n==0)return;
         cursor-=n;while(moves.size()>cursor)moves.remove(moves.size()-1);
         while(positions.size()>cursor+1)positions.remove(positions.size()-1);
         board.loadFromFen(positions.get(cursor));boardView.selected=null;render();refreshEvaluation();}
     void play(Move move) {
-        if(thinking || cursor!=moves.size() || board.getSideToMove()!=Side.WHITE || board.isMated())return;
+        if(browsingLichess || thinking || cursor!=moves.size() || board.getSideToMove()!=Side.WHITE || board.isMated())return;
         if(!board.doMove(move))return;
         moves.add(move);positions.add(board.getFen());cursor=moves.size();boardView.selected=null;render();
         if(!board.isDraw()&&!board.isMated()&&!board.isStaleMate())requestEngineMove();
         else refreshEvaluation();
     }
     void requestEngineMove() {
+        if(browsingLichess)return;
         if(thinking)return;thinking=true;int stamp=++version;String fen=board.getFen();int elo=level;render();refreshEvaluation();
         worker.execute(()->{
             String best=Engine.ask(enginePath,fen,elo,false);
@@ -226,17 +290,28 @@ public class MainActivity extends Activity {
         });
     }
     void sharePgn() {
-        StringBuilder p=new StringBuilder("[Event \"Chess Master BG\"]\n[White \"Player\"]\n[Black \"Stockfish 18\"]\n[Result \"*\"]\n\n");
+        StringBuilder p=new StringBuilder();
+        if(browsingLichess && selectedLichessGame!=null){
+            LichessGame g=selectedLichessGame;
+            p.append("[Event \"Lichess\"]\n[Site \"https://lichess.org/").append(pgnTag(g.id)).append("\"]\n")
+             .append("[Date \"").append(g.pgnDate()).append("\"]\n")
+             .append("[White \"").append(pgnTag(g.white)).append("\"]\n")
+             .append("[Black \"").append(pgnTag(g.black)).append("\"]\n")
+             .append("[Result \"").append(g.result).append("\"]\n\n");
+        } else {
+            p.append("[Event \"Chess Master BG\"]\n[White \"Player\"]\n[Black \"Stockfish 18\"]\n[Result \"*\"]\n\n");
+        }
         try {
             MoveList ml=new MoveList();for(Move m:moves)ml.add(m);
             String[] san=ml.toSanArray();
             for(int i=0;i<san.length;i++){if(i%2==0)p.append(i/2+1).append(". ");p.append(san[i]).append(" ");}
         }catch(Exception ex){for(int i=0;i<moves.size();i++)p.append(moves.get(i)).append(" ");}
-        p.append("*");
+        p.append(browsingLichess && selectedLichessGame!=null?selectedLichessGame.result:"*");
         Intent share=new Intent(Intent.ACTION_SEND);share.setType("text/plain");share.putExtra(Intent.EXTRA_TEXT,p.toString());
         startActivity(Intent.createChooser(share,"Сподели PGN"));
     }
-    @Override protected void onDestroy(){version++;evaluationVersion++;worker.shutdownNow();super.onDestroy();}
+    static String pgnTag(String s){return s.replace("\\","\\\\").replace("\"","\\\"").replace("\n"," ");}
+    @Override protected void onDestroy(){version++;evaluationVersion++;worker.shutdownNow();networkWorker.shutdownNow();super.onDestroy();}
 
     class BoardView extends View {
         Paint paint=new Paint(3); Square selected=null;
@@ -258,6 +333,32 @@ public class MainActivity extends Activity {
                 if(col==0){paint.setTextSize(z*.18f);paint.setColor(light?0xff56715e:0xfff7f3e7);paint.setTextAlign(Paint.Align.LEFT);c.drawText(""+(8-row),ox+col*z+3,oy+row*z+z*.2f,paint);}
                 if(row==7){paint.setTextSize(z*.18f);paint.setColor(light?0xff56715e:0xfff7f3e7);paint.setTextAlign(Paint.Align.RIGHT);c.drawText(""+(char)('a'+col),ox+(col+1)*z-3,oy+(row+1)*z-4,paint);}
             }
+            drawEngineArrow(c,z,ox,oy);
+        }
+        void drawEngineArrow(Canvas c,int z,float ox,float oy){
+            if(!showArrow || bestMoveArrow==null || bestMoveArrow.length()<4)return;
+            String u=bestMoveArrow.toLowerCase(Locale.US);
+            int sc=u.charAt(0)-'a',sr=8-(u.charAt(1)-'0');
+            int tc=u.charAt(2)-'a',tr=8-(u.charAt(3)-'0');
+            if(sc<0||sc>=8||tc<0||tc>=8||sr<0||sr>=8||tr<0||tr>=8)return;
+            float sx=ox+(sc+.5f)*z,sy=oy+(sr+.5f)*z;
+            float tx=ox+(tc+.5f)*z,ty=oy+(tr+.5f)*z;
+            float dx=tx-sx,dy=ty-sy,len=(float)Math.hypot(dx,dy);
+            if(len<1)return;
+            float ux=dx/len,uy=dy/len;
+            float tipx=tx-ux*z*.14f,tipy=ty-uy*z*.14f;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setStrokeWidth(z*.13f);
+            paint.setColor(0xce16a4c8);
+            c.drawLine(sx,sy,tipx-ux*z*.18f,tipy-uy*z*.18f,paint);
+            paint.setStyle(Paint.Style.FILL);
+            Path arrow=new Path();
+            arrow.moveTo(tipx,tipy);
+            arrow.lineTo(tipx-ux*z*.33f-uy*z*.2f,tipy-uy*z*.33f+ux*z*.2f);
+            arrow.lineTo(tipx-ux*z*.33f+uy*z*.2f,tipy-uy*z*.33f-ux*z*.2f);
+            arrow.close();
+            c.drawPath(arrow,paint);
         }
         void drawPiece(Canvas c, Piece piece, float x, float y, int z) {
             String n=piece.name();boolean white=n.startsWith("WHITE");
@@ -302,7 +403,7 @@ public class MainActivity extends Activity {
         }
         @Override public boolean onTouchEvent(android.view.MotionEvent e) {
             if(e.getAction()!=MotionEvent.ACTION_UP)return true;
-            if(thinking || cursor!=moves.size() || board.getSideToMove()!=Side.WHITE)return true;
+            if(browsingLichess || thinking || cursor!=moves.size() || board.getSideToMove()!=Side.WHITE)return true;
             int z=Math.min(getWidth(),getHeight())/8;if(z==0)return true;
             int col=(int)((e.getX()-(getWidth()-8*z)/2f)/z),row=(int)((e.getY()-(getHeight()-8*z)/2f)/z);
             if(col<0||col>7||row<0||row>7)return true;
@@ -320,13 +421,59 @@ public class MainActivity extends Activity {
         }
     }
 
+    class EvaluationBarView extends View {
+        Paint barPaint=new Paint(3);
+        volatile float whiteFraction=.5f;
+        EvaluationBarView(Context context){super(context);}
+        @Override protected void onDraw(Canvas canvas){
+            float w=getWidth(), h=getHeight();
+            float t=h*(1-Math.max(0,Math.min(1,whiteFraction)));
+            barPaint.setStyle(Paint.Style.FILL);
+            barPaint.setColor(0xff282e31);
+            canvas.drawRect(0,0,w,t,barPaint);
+            barPaint.setColor(0xfff9f6eb);
+            canvas.drawRect(0,t,w,h,barPaint);
+            barPaint.setStyle(Paint.Style.STROKE);
+            barPaint.setStrokeWidth(dp(1));
+            barPaint.setColor(0xff89938e);
+            canvas.drawRect(.5f,.5f,w-.5f,h-.5f,barPaint);
+            barPaint.setStyle(Paint.Style.FILL);
+            barPaint.setColor(0xff16a4c8);
+            canvas.drawRect(0,t-dp(1),w,t+dp(1),barPaint);
+        }
+    }
+
     static class Engine {
         static String ask(String path,String fen,int elo,boolean analysis) {
             return ask(path,fen,elo,analysis,analysis?3000:850);
         }
-        static String evaluate(String path,String fen) {
-            String analysis = ask(path,fen,3190,true,1000);
-            return analysis==null?null:analysis.split("\\n",2)[0];
+        static class EvalInfo {
+            String summary, bestMove;
+            double pawns=0;
+            boolean hasScore=false;
+        }
+        static EvalInfo evaluatePosition(String path,String fen) {
+            String result=ask(path,fen,3190,true,1100);
+            if(result==null)return null;
+            EvalInfo evaluation=new EvalInfo();
+            String[] lines=result.split("\n");
+            evaluation.summary=lines.length>0?lines[0]:"Оценка: неизвестна";
+            try {
+                int p=evaluation.summary.lastIndexOf(':');
+                if(evaluation.summary.startsWith("Оценка за белите:") && p>=0){
+                    evaluation.pawns=Double.parseDouble(evaluation.summary.substring(p+1).trim());
+                    evaluation.hasScore=true;
+                } else if(evaluation.summary.startsWith("Мат за белите")){
+                    evaluation.pawns=100; evaluation.hasScore=true;
+                } else if(evaluation.summary.startsWith("Мат за черните")){
+                    evaluation.pawns=-100; evaluation.hasScore=true;
+                }
+            } catch (Exception ignored){}
+            if(lines.length>1){
+                java.util.regex.Matcher m=java.util.regex.Pattern.compile("\\b[a-h][1-8][a-h][1-8][qrbn]?\\b").matcher(lines[1]);
+                if(m.find())evaluation.bestMove=m.group(0);
+            }
+            return evaluation;
         }
         static String ask(String path,String fen,int elo,boolean analysis,int timeMs) {
             java.lang.Process process=null;
