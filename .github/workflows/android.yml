@@ -14,7 +14,20 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - uses: android-actions/setup-android@v3
+      # GitHub-hosted Ubuntu runners already include the Android SDK.
+      # setup-android@v3 currently attempts to install removed SDK 'tools' and fails.
+      - name: Use preinstalled Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" || true
+          fi
+          test -d "$ANDROID_HOME/platforms/android-35"
+
       - name: Download verified Stockfish 18 engine for ARM64
         shell: bash
         run: |
