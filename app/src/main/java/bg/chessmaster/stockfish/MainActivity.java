@@ -124,6 +124,10 @@ public class MainActivity extends Activity {
         libraryRow.addView(arrowControl,arrowParams);
         arrowButton=arrowControl;
         updateArrowButton();
+        TextView weaknessButton=button("Слаби дебюти с белите и черните",()->showWeakOpenings());
+        LinearLayout.LayoutParams weaknessParams=new LinearLayout.LayoutParams(-1,dp(47));
+        weaknessParams.setMargins(dp(2),dp(5),dp(2),dp(2));
+        root.addView(weaknessButton,weaknessParams);
         evaluationText=new TextView(this);
         evaluationText.setTextSize(16);
         evaluationText.setTextColor(Color.rgb(26,56,65));
@@ -510,8 +514,65 @@ public class MainActivity extends Activity {
         for(int i=0;i<titles.length;i++)titles[i]=(i+1)+". "+libraryGames.get(i).label();
         new AlertDialog.Builder(this).setTitle("Lichess: "+currentLibraryUser+" · "+titles.length+" партии")
             .setItems(titles,(dialog,index)->openLichessGame(libraryGames.get(index)))
+            .setNeutralButton("Слаби дебюти",(dialog,which)->showWeakOpenings())
             .setNegativeButton("Затвори",null).show();
     }
+    void showWeakOpenings() {
+        if(libraryGames.isEmpty() || currentLibraryUser.isEmpty()){
+            new AlertDialog.Builder(this)
+                .setTitle("Слаби дебюти")
+                .setMessage("Изтегли партии от Lichess или избери запазен потребител чрез бутона „Партии“.")
+                .setPositiveButton("Партии",(d,w)->showSavedLibraries())
+                .setNegativeButton("Затвори",null).show();
+            return;
+        }
+        ArrayList<OpeningWeaknessAnalyzer.Game> data=new ArrayList<>();
+        for(LichessGame game:libraryGames){
+            data.add(new OpeningWeaknessAnalyzer.Game(
+                game.white,game.black,game.result,game.opening));
+        }
+        OpeningWeaknessAnalyzer.Report report=
+            OpeningWeaknessAnalyzer.analyze(currentLibraryUser,data);
+        StringBuilder message=new StringBuilder();
+        message.append("Проучване на ").append(libraryGames.size()).append(" изтеглени партии за ")
+            .append(currentLibraryUser).append(".\n\n");
+        appendWeakSide(message,"С БЕЛИТЕ",report.whiteGames,report.white);
+        message.append("\n");
+        appendWeakSide(message,"С ЧЕРНИТЕ",report.blackGames,report.black);
+        if(report.missingOpenings>0){
+            message.append("\nЗа ").append(report.missingOpenings)
+                .append(" партии липсва информация за дебюта.\n");
+        }
+        if(report.skipped>0){
+            message.append("\nПропуснати записи без съвпадащ играч или резултат: ")
+                .append(report.skipped).append(".\n");
+        }
+        message.append("\nТова са дебюти за допълнителна подготовка, не непременно дебюти, които трябва да изоставиш.");
+        new AlertDialog.Builder(this)
+            .setTitle("Дебютни слабости · "+currentLibraryUser)
+            .setMessage(message.toString())
+            .setPositiveButton("Към партиите",(d,w)->showGamePicker())
+            .setNegativeButton("Затвори",null).show();
+    }
+    void appendWeakSide(StringBuilder output,String title,int total,List<OpeningWeaknessAnalyzer.Stat> stats) {
+        output.append(title).append(" · ").append(total).append(" партии\n");
+        List<OpeningWeaknessAnalyzer.Stat> weakest=OpeningWeaknessAnalyzer.weakest(stats,3);
+        if(weakest.isEmpty()){
+            output.append("Няма достатъчно партии с разпознат дебют.\n");
+            return;
+        }
+        boolean small=true;
+        for(OpeningWeaknessAnalyzer.Stat st:weakest){
+            if(st.games>=3)small=false;
+        }
+        if(small) output.append("⚠ Малка извадка: под 3 партии на дебют.\n");
+        for(int i=0;i<weakest.size();i++){
+            OpeningWeaknessAnalyzer.Stat st=weakest.get(i);
+            output.append(i+1).append(". ").append(st.describe()).append("\n");
+            output.append("   → Препоръка: разгледай тези партии със Stockfish.\n");
+        }
+    }
+
     void openLichessGame(LichessGame game){
         try {
             LichessMoveParser.Replay parsed=LichessMoveParser.parse(game.movesText);
