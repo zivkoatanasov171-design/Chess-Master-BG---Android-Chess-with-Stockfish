@@ -3,7 +3,7 @@
 Android приложение за игра срещу **Stockfish 18**, работещо офлайн, с настройка на силата (1320–3190 Elo), анализ на позиции, преглед на партията ход по ход, отмяна на ходове, автоматично съхраняване и споделяне на PGN.
 
 ## APK — инсталиране на телефона
-1. Отвори раздел **Actions**: https://github.com/zivkoatanasov171-design/Chess-Master-BG---Android-Chess-with-Stockfish/actions
+**По-лесно:** след успешна компилация отвори [Releases](https://github.com/zivkoatanasov171-design/Chess-Master-BG---Android-Chess-with-Stockfish/releases), избери **Chess Master BG — Android APK** и изтегли **Chess-Master-BG.apk** директно, без разархивиране.\n\n**Резервен вариант (Actions):**\n1. Отвори раздел **Actions**: https://github.com/zivkoatanasov171-design/Chess-Master-BG---Android-Chess-with-Stockfish/actions
 2. Избери последната успешна задача **Build Android APK**.
 3. В раздел **Artifacts** свали **Chess-Master-BG-Android-APK**.
 4. Разархивирай ZIP и инсталирай `app-debug.apk` на Android телефон с **ARM64**, Android 8 или по-нов.
