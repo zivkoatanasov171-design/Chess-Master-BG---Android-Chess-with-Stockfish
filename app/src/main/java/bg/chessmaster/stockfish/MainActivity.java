@@ -514,29 +514,12 @@ public class MainActivity extends Activity {
     }
     void openLichessGame(LichessGame game){
         try {
+            LichessMoveParser.Replay parsed=LichessMoveParser.parse(game.movesText);
+            if(!browsingLichess)savePreferences(); // Preserve existing player game.
             Board fresh=new Board();
-            ArrayList<Move> replay=new ArrayList<>();
-            ArrayList<String> fens=new ArrayList<>();
-            fens.add(fresh.getFen());
-            String[] tokens=game.movesText.split("\\s+");
-            if(tokens.length>700)throw new IOException("Партията съдържа твърде много ходове.");
-            for(String moveText:tokens){
-                Move found=null;
-                for(Move candidate:fresh.legalMoves()){
-                    if(candidate.toString().equalsIgnoreCase(moveText)){found=candidate;break;}
-                }
-                if(found==null)throw new IOException("Неразпознат ход: "+moveText);
-                if(!fresh.doMove(found))throw new IOException("Невалиден ход: "+moveText);
-                replay.add(found);
-                fens.add(fresh.getFen());
-            }
-            if(!browsingLichess)savePreferences(); // Keep the user's actual game untouched.
-            String[] san=null;
-            try {
-                MoveList convert=new MoveList();
-                for(Move m:replay)convert.add(m);
-                san=convert.toSanArray();
-            } catch(Exception ignored){}
+            ArrayList<Move> replay=parsed.moves;
+            ArrayList<String> fens=parsed.positions;
+            String[] san=parsed.san;
             version++;evaluationVersion++;
             thinking=false;
             browsingLichess=true;
@@ -552,7 +535,7 @@ public class MainActivity extends Activity {
             refreshEvaluation();
         }catch(Exception error){
             new AlertDialog.Builder(this).setTitle("Партията не може да се отвори")
-                .setMessage(error.getMessage())
+                .setMessage(error.getMessage()==null?"Неизвестна грешка при прочитане на ходовете.":error.getMessage())
                 .setPositiveButton("OK",null).show();
         }
     }
@@ -649,19 +632,22 @@ public class MainActivity extends Activity {
             String n=piece.name();boolean white=n.startsWith("WHITE");
             String type=n.substring(n.indexOf('_')+1);
             int idx=type.equals("PAWN")?0:type.equals("KNIGHT")?1:type.equals("BISHOP")?2:type.equals("ROOK")?3:type.equals("QUEEN")?4:5;
-            String glyph=symbols.substring(idx+(white?0:6),idx+(white?0:6)+1);
+            // Use the solid (black) chess Unicode silhouette for BOTH sides.
+            // Render white pieces with an opaque white fill and a dark outline,
+            // rather than using the hollow white Unicode glyphs.
+            String glyph=symbols.substring(idx+6,idx+7);
             paint.setShadowLayer(0,0,0,Color.TRANSPARENT);
             paint.setTextAlign(Paint.Align.CENTER);
             paint.setStyle(Paint.Style.FILL);
             if(pieceStyle==0) {
                 paint.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL));
                 paint.setTextSize(z*.79f);
-                paint.setStrokeWidth(z*.035f);
+                paint.setStrokeWidth(z*.049f);
                 paint.setStyle(Paint.Style.STROKE);
                 paint.setColor(white?0xff30312d:0xfff0f2e5);
                 c.drawText(glyph,x,y+z*.28f,paint);
                 paint.setStyle(Paint.Style.FILL);
-                paint.setColor(white?Color.WHITE:0xff1e2925);
+                paint.setColor(white?0xffffffff:0xff1e2925);
                 c.drawText(glyph,x,y+z*.28f,paint);
                 return;
             }
