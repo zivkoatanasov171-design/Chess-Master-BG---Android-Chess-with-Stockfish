@@ -12,6 +12,7 @@ import java.io.*;
 import java.io.File; // Avoid chesslib.File / java.io.File name collision.
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
 import org.json.*;
@@ -29,7 +30,9 @@ public class MainActivity extends Activity {
     LichessGame selectedLichessGame = null;
     String[] displayedSan = null;
     ArrayList<LichessGame> libraryGames = new ArrayList<>();
-    volatile boolean downloadInProgress = false;
+    volatile boolean downloadInProgress = false, studyRunning = false;
+    CriticalMoveAnalyzer.Report lastCriticalReport = null;
+    String lastCriticalUser = "";
     ExecutorService networkWorker = Executors.newSingleThreadExecutor();
     LinearLayout root;
     BoardView boardView;
@@ -128,6 +131,10 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams weaknessParams=new LinearLayout.LayoutParams(-1,dp(47));
         weaknessParams.setMargins(dp(2),dp(5),dp(2),dp(2));
         root.addView(weaknessButton,weaknessParams);
+        TextView criticalButton=button("Stockfish: Къде губя равенството?",()->showCriticalSettings());
+        LinearLayout.LayoutParams criticalParams=new LinearLayout.LayoutParams(-1,dp(49));
+        criticalParams.setMargins(dp(2),dp(5),dp(2),dp(2));
+        root.addView(criticalButton,criticalParams);
         evaluationText=new TextView(this);
         evaluationText.setTextSize(16);
         evaluationText.setTextColor(Color.rgb(26,56,65));
@@ -571,6 +578,185 @@ public class MainActivity extends Activity {
             output.append(i+1).append(". ").append(st.describe()).append("\n");
             output.append("   → Препоръка: разгледай тези партии със Stockfish.\n");
         }
+    }
+
+    void showCriticalSettings() {
+        if(studyRunning){
+            Toast.makeText(this,"Stockfish вече анализира избраните партии.",Toast.LENGTH_LONG).show();
+            return;
+        }
+        if(libraryGames.isEmpty() || currentLibraryUser.isEmpty()){
+            new AlertDialog.Builder(this).setTitle("Критични ходове със Stockfish")
+                .setMessage("Първо изтегли партиите от Lichess или отвори запазената библиотека чрез „Партии“.")
+                .setPositiveButton("Избери партии",(d,w)->showSavedLibraries())
+                .setNegativeButton("Затвори",null).show();
+            return;
+        }
+        String[] modes={
+            "Бърз · до 3 партии с всеки цвят · първите 15 хода",
+            "Нормален · до 5 партии с всеки цвят · първите 20 хода",
+            "Подробен · до 10 партии с всеки цвят · първите 25 хода"
+        };
+        final int[] selected={1};
+        new AlertDialog.Builder(this).setTitle("Къде губи равенството?")
+            .setMessage("Stockfish проверява само ходове на избрания шахматист. Търси първото рязко преминаване от приблизително равна към значително по-лоша позиция. Това е ориентировъчен анализ.")
+            .setSingleChoiceItems(modes,1,(d,w)->selected[0]=w)
+            .setPositiveButton("Анализирай",(d,w)->{
+                int[] maxPerSide={3,5,10};
+                int[] maxHalfMoves={30,40,50};
+                int[] thinkingMs={140,190,240};
+                int i=selected[0];
+                runCriticalScan(maxPerSide[i],maxHalfMoves[i],thinkingMs[i]);
+            })
+            .setNegativeButton("Отказ",null).show();
+    }
+    void runCriticalScan(int perColour,int maxPly,int thinkMs) {
+        if(studyRunning || libraryGames.isEmpty())return;
+        studyRunning=true;
+        lastCriticalReport=null;
+        final String username=currentLibraryUser;
+        final ArrayList<LichessGame> games=new ArrayList<>(libraryGames);
+        final AtomicBoolean cancelled=new AtomicBoolean(false);
+        AlertDialog progress=new AlertDialog.Builder(this)
+            .setTitle("Stockfish · критични ходове")
+            .setMessage("Подготвяне на партиите…")
+            .setNegativeButton("Прекрати",(d,w)->cancelled.set(true))
+            .create();
+        progress.setCancelable(false);
+        progress.show();
+        networkWorker.execute(()->{
+            try{
+                ArrayList<CriticalMoveAnalyzer.Game> playable=new ArrayList<>();
+                int white=0,black=0,invalid=0;
+                for(LichessGame g:games){
+                    if(cancelled.get())break;
+                    boolean w=username.equalsIgnoreCase(g.white.trim());
+                    boolean b=username.equalsIgnoreCase(g.black.trim());
+                    if(w==b || (w && white>=perColour) || (b && black>=perColour))continue;
+                    try{
+                        LichessMoveParser.Replay positions=LichessMoveParser.parse(g.movesText);
+                        playable.add(new CriticalMoveAnalyzer.Game(
+                            g.id,g.white,g.black,g.opening,positions.positions,positions.san));
+                        if(w)white++;else black++;
+                    }catch(Exception ignored){invalid++;}
+                    if(white>=perColour && black>=perColour)break;
+                }
+                if(playable.isEmpty())throw new IOException("Няма подходящи стандартни партии за анализ.");
+                final int invalidFinal=invalid;
+                CriticalMoveAnalyzer.Report report;
+                try(StockfishStudyEngine stockfish=new StockfishStudyEngine(enginePath,thinkMs)){
+                    report=CriticalMoveAnalyzer.analyze(username,playable,perColour,maxPly,
+                        stockfish,new CriticalMoveAnalyzer.Progress(){
+                            @Override public boolean cancelled(){return cancelled.get();}
+                            @Override public void updated(int done,int total,String game){
+                                runOnUiThread(()->{
+                                    if(progress.isShowing())
+                                        progress.setMessage("Проверени "+done+" от "+total+
+                                            " партии\n"+game);
+                                });
+                            }
+                        });
+                }
+                runOnUiThread(()->{
+                    studyRunning=false;
+                    if(progress.isShowing())progress.dismiss();
+                    if(cancelled.get()){
+                        Toast.makeText(this,"Анализът е прекратен.",Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    lastCriticalReport=report;
+                    lastCriticalUser=username;
+                    showCriticalReport(report,invalidFinal,maxPly);
+                });
+            }catch(Exception ex){
+                runOnUiThread(()->{
+                    studyRunning=false;
+                    if(progress.isShowing())progress.dismiss();
+                    if(cancelled.get())return;
+                    new AlertDialog.Builder(this).setTitle("Неуспешен Stockfish анализ")
+                        .setMessage(ex.getMessage()==null?"Непозната грешка.":ex.getMessage())
+                        .setPositiveButton("OK",null).show();
+                });
+            }
+        });
+    }
+    void showCriticalReport(CriticalMoveAnalyzer.Report report,int invalid,int maxPly){
+        StringBuilder s=new StringBuilder();
+        s.append("Проверени ").append(report.examined).append(" партии, до ")
+            .append(maxPly/2).append("-ия ход.\n");
+        s.append("Критерий: позиция в рамките на ±0.80 пешки се влошава до поне −0.90 пешки за играча и спад ≥ 0.85.\n\n");
+        appendCriticalSide(s,"С БЕЛИТЕ",true,report);
+        s.append("\n");
+        appendCriticalSide(s,"С ЧЕРНИТЕ",false,report);
+        if(invalid>0 || report.failed>0)
+            s.append("\nПропуснати/неуспешни: ").append(invalid+report.failed).append(" партии.\n");
+        s.append("\nБързият анализ не доказва грешка в дебюта. За критичните позиции провери с по-дълъг анализ.");
+        AlertDialog.Builder dialog=new AlertDialog.Builder(this)
+            .setTitle("Критични ходове · "+lastCriticalUser)
+            .setMessage(s.toString())
+            .setNegativeButton("Затвори",null);
+        if(!report.findings.isEmpty()){
+            dialog.setPositiveButton("Отвори позициите",(d,w)->showCriticalFindings(report));
+        }
+        dialog.show();
+    }
+    void appendCriticalSide(StringBuilder s,String label,boolean asWhite,
+                            CriticalMoveAnalyzer.Report report){
+        int count=asWhite?report.whiteExamined:report.blackExamined;
+        int found=0;
+        for(CriticalMoveAnalyzer.Finding f:report.findings)
+            if(f.asWhite==asWhite)found++;
+        s.append(label).append(": ").append(found).append(" от ")
+            .append(count).append(" анализирани партии с критичен ход.\n");
+        List<CriticalMoveAnalyzer.Frequency> peaks=report.peaks(asWhite);
+        if(peaks.isEmpty()){
+            s.append("Няма засечен преход по избрания критерий.\n");
+            return;
+        }
+        s.append("Най-често на ход: ");
+        for(int i=0;i<Math.min(4,peaks.size());i++){
+            if(i>0)s.append(", ");
+            CriticalMoveAnalyzer.Frequency peak=peaks.get(i);
+            s.append(peak.moveNumber).append(" (").append(peak.count).append(" партии)");
+        }
+        s.append("\n");
+    }
+    void showCriticalFindings(CriticalMoveAnalyzer.Report report){
+        if(report.findings.isEmpty())return;
+        String[] names=new String[report.findings.size()];
+        for(int i=0;i<names.length;i++){
+            CriticalMoveAnalyzer.Finding f=report.findings.get(i);
+            names[i]=(f.asWhite?"Бели":"Черни")+" · "+f.fullMove+
+                (f.asWhite?".":"...")+f.played+" · "+
+                String.format(Locale.US,"−%.2f",f.loss)+" пешки\n"+
+                OpeningWeaknessAnalyzer.openingFamily(f.game.opening);
+        }
+        new AlertDialog.Builder(this).setTitle("Избери критична позиция")
+            .setItems(names,(d,index)->openCriticalPosition(report.findings.get(index)))
+            .setNegativeButton("Затвори",null).show();
+    }
+    void openCriticalPosition(CriticalMoveAnalyzer.Finding finding){
+        if(!lastCriticalUser.equalsIgnoreCase(currentLibraryUser)){
+            Toast.makeText(this,"Отвори отново библиотеката на "+lastCriticalUser,Toast.LENGTH_LONG).show();
+            return;
+        }
+        LichessGame selected=null;
+        for(LichessGame g:libraryGames)
+            if(g.id.equals(finding.game.id)){selected=g;break;}
+        if(selected==null){
+            Toast.makeText(this,"Партията вече не е в текущата библиотека.",Toast.LENGTH_LONG).show();
+            return;
+        }
+        openLichessGame(selected);
+        if(!browsingLichess || selectedLichessGame!=selected)return;
+        cursor=Math.min(positions.size()-1,finding.halfMoveIndex+1);
+        board.loadFromFen(positions.get(cursor));
+        boardView.selected=null;
+        render();
+        refreshEvaluation();
+        Toast.makeText(this,"Критичен ход "+finding.fullMove+
+            (finding.asWhite?".":"...")+finding.played+
+            " · Натисни „Анализ“ за подробности.",Toast.LENGTH_LONG).show();
     }
 
     void openLichessGame(LichessGame game){
