@@ -599,7 +599,6 @@ public class MainActivity extends Activity {
         };
         final int[] selected={1};
         new AlertDialog.Builder(this).setTitle("Къде губи равенството?")
-            .setMessage("Stockfish проверява само ходове на избрания шахматист. Търси първото рязко преминаване от приблизително равна към значително по-лоша позиция. Това е ориентировъчен анализ.")
             .setSingleChoiceItems(modes,1,(d,w)->selected[0]=w)
             .setPositiveButton("Анализирай",(d,w)->{
                 int[] maxPerSide={3,5,10};
