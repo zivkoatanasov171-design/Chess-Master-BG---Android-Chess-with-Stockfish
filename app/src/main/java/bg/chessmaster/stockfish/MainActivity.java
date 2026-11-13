@@ -9,6 +9,7 @@ import android.widget.*;
 import com.github.bhlangonijr.chesslib.*;
 import com.github.bhlangonijr.chesslib.move.*;
 import java.io.*;
+import java.io.File; // Avoid chesslib.File / java.io.File name collision.
 import java.util.*;
 import java.util.concurrent.*;
 import java.net.*;
@@ -26,6 +27,7 @@ public class MainActivity extends Activity {
     String bestMoveArrow = null;
     String currentLibraryUser = "";
     LichessGame selectedLichessGame = null;
+    String[] displayedSan = null;
     ArrayList<LichessGame> libraryGames = new ArrayList<>();
     volatile boolean downloadInProgress = false;
     ExecutorService networkWorker = Executors.newSingleThreadExecutor();
@@ -234,7 +236,7 @@ public class MainActivity extends Activity {
             board.getSideToMove()==Side.WHITE?"Ти си с белите • твой ход":"Stockfish е на ход";
         info.setText(state);
         StringBuilder s=new StringBuilder("Ходове: ");
-        for(int i=0;i<moves.size();i++) {if(i%2==0)s.append("\n").append(i/2+1).append(". ");s.append(moves.get(i).toString()).append(i==cursor-1?" ◀ ":"  ");}
+        for(int i=0;i<moves.size();i++) {if(i%2==0)s.append("\n").append(i/2+1).append(". ");s.append(browsingLichess && displayedSan!=null && i<displayedSan.length ? displayedSan[i] : moves.get(i).toString()).append(i==cursor-1?" ◀ ":"  ");}
         notation.setText(s.toString());
         savePreferences();
     }
@@ -529,9 +531,16 @@ public class MainActivity extends Activity {
                 fens.add(fresh.getFen());
             }
             if(!browsingLichess)savePreferences(); // Keep the user's actual game untouched.
+            String[] san=null;
+            try {
+                MoveList convert=new MoveList();
+                for(Move m:replay)convert.add(m);
+                san=convert.toSanArray();
+            } catch(Exception ignored){}
             version++;evaluationVersion++;
             thinking=false;
             browsingLichess=true;
+            displayedSan=san;
             selectedLichessGame=game;
             board=fresh;
             moves=replay;
@@ -552,6 +561,7 @@ public class MainActivity extends Activity {
         version++;evaluationVersion++;thinking=false;
         browsingLichess=false;
         selectedLichessGame=null;
+        displayedSan=null;
         board=new Board();
         moves=new ArrayList<>();
         positions=new ArrayList<>();
