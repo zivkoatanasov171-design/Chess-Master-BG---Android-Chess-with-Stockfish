@@ -289,6 +289,281 @@ public class MainActivity extends Activity {
                     .setPositiveButton("OK",null).show();render();});
         });
     }
+
+    static class LichessGame {
+        String id, white, black, result, speed, movesText, opening;
+        long createdAt;
+        LichessGame(JSONObject json){
+            id=json.optString("id","");
+            JSONObject players=json.optJSONObject("players");
+            white=playerName(players,"white");
+            black=playerName(players,"black");
+            String winner=json.optString("winner","");
+            result=winner.equals("white")?"1-0":winner.equals("black")?"0-1":"1/2-1/2";
+            speed=json.optString("speed","?");
+            movesText=json.optString("moves","").trim();
+            createdAt=json.optLong("createdAt",0);
+            JSONObject op=json.optJSONObject("opening");
+            opening=op==null?"":op.optString("name","");
+        }
+        static String playerName(JSONObject players,String side){
+            JSONObject p=players==null?null:players.optJSONObject(side);
+            JSONObject user=p==null?null:p.optJSONObject("user");
+            String name=user==null?"":user.optString("name","");
+            if(name.isEmpty())name=p==null?"Анонимен":p.optString("name","Анонимен");
+            return name;
+        }
+        String date(){
+            return createdAt<=0?"Без дата":
+                new java.text.SimpleDateFormat("dd.MM.yyyy",Locale.US).format(new java.util.Date(createdAt));
+        }
+        String pgnDate(){
+            return createdAt<=0?"????.??.??":
+                new java.text.SimpleDateFormat("yyyy.MM.dd",Locale.US).format(new java.util.Date(createdAt));
+        }
+        String label(){
+            return date()+" · "+white+" – "+black+" · "+result+" · "+speed;
+        }
+    }
+
+    void askLichessUser(){
+        if(downloadInProgress){
+            Toast.makeText(this,"Изтегляне в ход…",Toast.LENGTH_SHORT).show();
+            return;
+        }
+        LinearLayout form=new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20),dp(8),dp(20),0);
+        TextView description=new TextView(this);
+        description.setText("Публични партии от lichess.org. За изтегляне е необходим интернет.");
+        description.setTextColor(Color.DKGRAY);
+        form.addView(description);
+        EditText nick=new EditText(this);
+        nick.setSingleLine(true);
+        nick.setHint("Потребителско име в Lichess");
+        nick.setInputType(android.text.InputType.TYPE_CLASS_TEXT);
+        nick.setText(getPreferences(0).getString("lichessLastUser",""));
+        form.addView(nick);
+        Spinner qty=new Spinner(this);
+        String[] amounts={"20 последни партии","50 последни партии","100 последни партии"};
+        ArrayAdapter<String> adapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_dropdown_item,amounts);
+        qty.setAdapter(adapter);
+        form.addView(qty);
+        new AlertDialog.Builder(this).setTitle("Изтегляне от Lichess")
+            .setView(form)
+            .setPositiveButton("Изтегли",(dialog,which)->{
+                String username=nick.getText().toString().trim();
+                if(!username.matches("[A-Za-z0-9_-]{2,30}")){
+                    new AlertDialog.Builder(this).setTitle("Невалидно потребителско име")
+                        .setMessage("Въведи само букви на латиница, цифри, _ или -.")
+                        .setPositiveButton("OK",null).show();
+                    return;
+                }
+                int[] numbers={20,50,100};
+                downloadLichessGames(username,numbers[qty.getSelectedItemPosition()]);
+            }).setNegativeButton("Отказ",null).show();
+    }
+
+    File libraryFile(String username){
+        String safe=username.toLowerCase(Locale.US);
+        return new File(getFilesDir(),"lichess_"+safe+".ndjson");
+    }
+    void rememberLibrary(String username){
+        java.util.LinkedHashSet<String> users=new java.util.LinkedHashSet<>();
+        users.add(username);
+        String prev=getPreferences(0).getString("lichessUsers","");
+        for(String x:prev.split(","))if(!x.isEmpty() && !x.equalsIgnoreCase(username))users.add(x);
+        getPreferences(0).edit()
+            .putString("lichessLastUser",username)
+            .putString("lichessUsers",android.text.TextUtils.join(",",users)).apply();
+    }
+    ArrayList<LichessGame> parseGames(String text) throws Exception{
+        ArrayList<LichessGame> games=new ArrayList<>();
+        for(String line:text.split("\n")){
+            if(line.trim().isEmpty())continue;
+            JSONObject j=new JSONObject(line);
+            String variant=j.optString("variant","standard");
+            String initialFen=j.optString("initialFen","startpos");
+            if(!variant.equalsIgnoreCase("standard") ||
+                !(initialFen.equalsIgnoreCase("startpos") || initialFen.isEmpty()))continue;
+            LichessGame game=new LichessGame(j);
+            if(!game.movesText.isEmpty() && !game.id.isEmpty())games.add(game);
+        }
+        return games;
+    }
+    String readLibraryText(String username)throws Exception{
+        File file=libraryFile(username);
+        if(!file.isFile())throw new IOException("Няма запазени партии за този потребител.");
+        if(file.length()>5000000)throw new IOException("Локалната база е твърде голяма.");
+        try(FileInputStream in=new FileInputStream(file);
+            ByteArrayOutputStream out=new ByteArrayOutputStream()){
+            byte[] buf=new byte[8192];int n;
+            while((n=in.read(buf))!=-1){
+                out.write(buf,0,n);
+                if(out.size()>5000000)throw new IOException("Базата е твърде голяма.");
+            }
+            return new String(out.toByteArray(),StandardCharsets.UTF_8);
+        }
+    }
+    String fetchLichess(String username,int max)throws Exception{
+        // Public Lichess endpoint; no account password or access token is required.
+        String endpoint="https://lichess.org/api/games/user/"+username+
+            "?max="+max+"&moves=true&opening=true&clocks=false&evals=false&finished=true&sort=dateDesc";
+        HttpURLConnection connection=(HttpURLConnection)new URL(endpoint).openConnection();
+        try{
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept","application/x-ndjson");
+            connection.setRequestProperty("User-Agent","ChessMasterBG/1.2 (Android chess study app)");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(30000);
+            int status=connection.getResponseCode();
+            if(status==404)throw new IOException("Потребителят не е намерен в Lichess (404).");
+            if(status==429)throw new IOException("Lichess ограничава заявките. Опитай по-късно (429).");
+            if(status!=200)throw new IOException("Lichess върна HTTP "+status+".");
+            try(BufferedReader in=new BufferedReader(new InputStreamReader(connection.getInputStream(),StandardCharsets.UTF_8))){
+                StringBuilder result=new StringBuilder();
+                String line;
+                while((line=in.readLine())!=null){
+                    if(line.isEmpty())continue;
+                    result.append(line).append('\n');
+                    if(result.length()>5000000)throw new IOException("Прекалено голям отговор от Lichess.");
+                }
+                return result.toString();
+            }
+        }finally{connection.disconnect();}
+    }
+    void storeLibrary(String username,String raw)throws Exception{
+        File target=libraryFile(username);
+        File tmp=new File(getFilesDir(),target.getName()+".part");
+        try(FileOutputStream out=new FileOutputStream(tmp)){
+            out.write(raw.getBytes(StandardCharsets.UTF_8));
+            out.getFD().sync();
+        }
+        if(target.exists() && !target.delete())throw new IOException("Няма достъп за обновяване на файла.");
+        if(!tmp.renameTo(target))throw new IOException("Неуспешно запазване на партиите.");
+    }
+    void downloadLichessGames(String username,int limit){
+        if(downloadInProgress)return;
+        downloadInProgress=true;
+        Toast.makeText(this,"Изтегляне на "+limit+" партии от Lichess…",Toast.LENGTH_LONG).show();
+        networkWorker.execute(()->{
+            try{
+                String raw=fetchLichess(username,limit);
+                ArrayList<LichessGame> games=parseGames(raw);
+                if(games.isEmpty())throw new IOException("Няма налични стандартни партии с ходове.");
+                storeLibrary(username,raw);
+                runOnUiThread(()->{
+                    downloadInProgress=false;
+                    rememberLibrary(username);
+                    currentLibraryUser=username;
+                    libraryGames=games;
+                    Toast.makeText(this,"Запазени "+games.size()+" партии за "+username,Toast.LENGTH_LONG).show();
+                    showGamePicker();
+                });
+            }catch(Exception e){
+                runOnUiThread(()->{
+                    downloadInProgress=false;
+                    new AlertDialog.Builder(this).setTitle("Неуспешно изтегляне")
+                        .setMessage(e.getMessage()==null?"Провери интернет връзката.":e.getMessage())
+                        .setPositiveButton("OK",null).show();
+                });
+            }
+        });
+    }
+    void showSavedLibraries(){
+        String all=getPreferences(0).getString("lichessUsers","");
+        ArrayList<String> users=new ArrayList<>();
+        for(String user:all.split(","))if(!user.isEmpty() && libraryFile(user).isFile())users.add(user);
+        if(users.isEmpty()){
+            new AlertDialog.Builder(this).setTitle("Запазени партии")
+                .setMessage("Все още няма изтеглени партии. Избери „Lichess ↓“ и въведи потребителско име.")
+                .setPositiveButton("OK",null).show();
+            return;
+        }
+        new AlertDialog.Builder(this).setTitle("Избери потребител в Lichess")
+            .setItems(users.toArray(new String[0]),(d,which)->openSavedLibrary(users.get(which)))
+            .setNegativeButton("Отказ",null).show();
+    }
+    void openSavedLibrary(String username){
+        networkWorker.execute(()->{
+            try{
+                ArrayList<LichessGame> games=parseGames(readLibraryText(username));
+                runOnUiThread(()->{
+                    currentLibraryUser=username;
+                    libraryGames=games;
+                    showGamePicker();
+                });
+            }catch(Exception e){
+                runOnUiThread(()->new AlertDialog.Builder(this).setTitle("Грешка при отваряне")
+                    .setMessage(e.getMessage()).setPositiveButton("OK",null).show());
+            }
+        });
+    }
+    void showGamePicker(){
+        if(libraryGames.isEmpty()){
+            Toast.makeText(this,"Няма стандартни партии за преглед.",Toast.LENGTH_LONG).show();
+            return;
+        }
+        String[] titles=new String[libraryGames.size()];
+        for(int i=0;i<titles.length;i++)titles[i]=(i+1)+". "+libraryGames.get(i).label();
+        new AlertDialog.Builder(this).setTitle("Lichess: "+currentLibraryUser+" · "+titles.length+" партии")
+            .setItems(titles,(dialog,index)->openLichessGame(libraryGames.get(index)))
+            .setNegativeButton("Затвори",null).show();
+    }
+    void openLichessGame(LichessGame game){
+        try {
+            Board fresh=new Board();
+            ArrayList<Move> replay=new ArrayList<>();
+            ArrayList<String> fens=new ArrayList<>();
+            fens.add(fresh.getFen());
+            String[] tokens=game.movesText.split("\\s+");
+            if(tokens.length>700)throw new IOException("Партията съдържа твърде много ходове.");
+            for(String moveText:tokens){
+                Move found=null;
+                for(Move candidate:fresh.legalMoves()){
+                    if(candidate.toString().equalsIgnoreCase(moveText)){found=candidate;break;}
+                }
+                if(found==null)throw new IOException("Неразпознат ход: "+moveText);
+                if(!fresh.doMove(found))throw new IOException("Невалиден ход: "+moveText);
+                replay.add(found);
+                fens.add(fresh.getFen());
+            }
+            if(!browsingLichess)savePreferences(); // Keep the user's actual game untouched.
+            version++;evaluationVersion++;
+            thinking=false;
+            browsingLichess=true;
+            selectedLichessGame=game;
+            board=fresh;
+            moves=replay;
+            positions=fens;
+            cursor=0;
+            board.loadFromFen(positions.get(0));
+            boardView.selected=null;
+            render();
+            refreshEvaluation();
+        }catch(Exception error){
+            new AlertDialog.Builder(this).setTitle("Партията не може да се отвори")
+                .setMessage(error.getMessage())
+                .setPositiveButton("OK",null).show();
+        }
+    }
+    void returnToMyGame(){
+        if(!browsingLichess)return;
+        version++;evaluationVersion++;thinking=false;
+        browsingLichess=false;
+        selectedLichessGame=null;
+        board=new Board();
+        moves=new ArrayList<>();
+        positions=new ArrayList<>();
+        positions.add(board.getFen());
+        restore();
+        boardView.selected=null;
+        render();
+        if(cursor==moves.size() && board.getSideToMove()==Side.BLACK && !board.isMated() && !board.isDraw())
+            requestEngineMove();
+        else refreshEvaluation();
+    }
+
     void sharePgn() {
         StringBuilder p=new StringBuilder();
         if(browsingLichess && selectedLichessGame!=null){
