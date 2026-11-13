@@ -206,7 +206,7 @@ public class MainActivity extends Activity {
 
     static class Engine {
         static String ask(String path,String fen,int elo,boolean analysis) {
-            Process process=null;
+            java.lang.Process process=null;
             try {
                 process=new ProcessBuilder(path).redirectErrorStream(true).start();
                 BufferedReader r=new BufferedReader(new InputStreamReader(process.getInputStream()));
