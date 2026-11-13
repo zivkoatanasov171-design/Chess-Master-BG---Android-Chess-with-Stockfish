@@ -16,7 +16,8 @@ public class MainActivity extends Activity {
     Board board = new Board();
     ArrayList<Move> moves = new ArrayList<>();
     ArrayList<String> positions = new ArrayList<>();
-    int cursor = 0, level = 1800, version = 0, evaluationVersion = 0;
+    int cursor = 0, level = 1800, version = 0;
+    volatile int evaluationVersion = 0;
     int boardTheme = 0, pieceStyle = 0;
     boolean analyzing = false, thinking = false, showEvaluation = false;
     LinearLayout root;
@@ -68,6 +69,7 @@ public class MainActivity extends Activity {
         SeekBar seek = new SeekBar(this); seek.setMax(strengths.length-1);
         int chosen=0;for(int i=0;i<strengths.length;i++)if(strengths[i]==level)chosen=i;
         seek.setProgress(chosen);
+        levelText.setText("Сила на Stockfish: "+strengthLabels[chosen]);
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){
             public void onProgressChanged(SeekBar s,int p,boolean user){level=strengths[p];levelText.setText("Сила на Stockfish: "+strengthLabels[p]);if(user)savePreferences();}
             public void onStartTrackingTouch(SeekBar s){} public void onStopTrackingTouch(SeekBar s){}
@@ -137,6 +139,14 @@ public class MainActivity extends Activity {
     void refreshEvaluation() {
         final int request = ++evaluationVersion;
         if(!showEvaluation || evaluationText==null)return;
+        if(board.isMated()) {
+            evaluationText.setText(board.getSideToMove()==Side.WHITE?"Мат за черните":"Мат за белите");
+            return;
+        }
+        if(board.isDraw() || board.isStaleMate()) {
+            evaluationText.setText("Реми · 0.00");
+            return;
+        }
         if(thinking) {
             evaluationText.setText("Оценка: след хода на Stockfish…");
             return;
@@ -144,6 +154,7 @@ public class MainActivity extends Activity {
         final String fen=board.getFen();
         evaluationText.setText("Stockfish изчислява оценката…");
         worker.execute(()->{
+            if(request!=evaluationVersion || !showEvaluation)return;
             final String result=Engine.evaluate(enginePath,fen);
             runOnUiThread(()->{
                 if(request!=evaluationVersion || !showEvaluation || !board.getFen().equals(fen))return;
@@ -225,7 +236,7 @@ public class MainActivity extends Activity {
         Intent share=new Intent(Intent.ACTION_SEND);share.setType("text/plain");share.putExtra(Intent.EXTRA_TEXT,p.toString());
         startActivity(Intent.createChooser(share,"Сподели PGN"));
     }
-    @Override protected void onDestroy(){version++;worker.shutdownNow();super.onDestroy();}
+    @Override protected void onDestroy(){version++;evaluationVersion++;worker.shutdownNow();super.onDestroy();}
 
     class BoardView extends View {
         Paint paint=new Paint(3); Square selected=null;
