@@ -4,7 +4,7 @@ on:
     branches: [main]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -39,3 +39,16 @@ jobs:
           name: Chess-Master-BG-Android-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+
+      - name: Prepare direct-download APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk Chess-Master-BG.apk
+      - name: Publish downloadable APK release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: android-latest
+          name: Chess Master BG — Android APK
+          body: 'Последна компилация за Android ARM64. Изтегли Chess-Master-BG.apk и го инсталирай на телефона.'
+          files: Chess-Master-BG.apk
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
