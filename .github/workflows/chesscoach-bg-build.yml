@@ -1,0 +1,72 @@
+name: Chess Coach BG - Build installable Android APK
+on:
+  push:
+    branches:
+      - chesscoach-bg-apk
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build-chess-coach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout GitHub branch
+        uses: actions/checkout@v4
+      - name: Restore Chess Coach BG sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf app tests scripts
+          base64 -d source/chesscoach-bg-source.tar.gz.base64 | tar -xz -C .
+          test -f app/build.gradle
+          test -f app/src/main/assets/style.css
+          test -f scripts/get-engine.sh
+          echo "Sources restored."
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Use preinstalled Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          if [ ! -d "$ANDROID_HOME/platforms/android-35" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35"
+          fi
+          if [ ! -d "$ANDROID_HOME/build-tools/35.0.0" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "build-tools;35.0.0"
+          fi
+          test -d "$ANDROID_HOME/platforms/android-35"
+      - name: Install Gradle 8.10.2
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.10.2'
+      - name: Download and verify Stockfish 19 Lite engine
+        run: bash scripts/get-engine.sh
+      - name: Validate chess rules and gameplay
+        run: |
+          node tests/rules.test.js
+          node tests/ui.test.js
+      - name: Compile Android debug APK
+        run: gradle --no-daemon :app:assembleDebug --stacktrace
+      - name: Prepare installable file
+        run: cp app/build/outputs/apk/debug/app-debug.apk ChessCoachBG-Android.apk
+      - name: Save build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChessCoachBG-Android-APK
+          path: ChessCoachBG-Android.apk
+          retention-days: 30
+          if-no-files-found: error
+      - name: Publish test APK as a pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: chesscoach-bg-v1.0.0
+          name: Chess Coach BG - Android test APK
+          body: 'Install ChessCoachBG-Android.apk on Android 8 or newer. Offline Stockfish 19 Lite. Classic high-contrast pieces and Bulgarian move explanations. This is a debug-signed test build.'
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: ChessCoachBG-Android.apk
